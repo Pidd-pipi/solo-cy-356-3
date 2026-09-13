@@ -63,35 +63,33 @@ func (s *PlotMemberService) ListByPlot(plotID uint) ([]model.PlotMember, error) 
 }
 
 // Leave 协作成员主动退出（owner 认养人不能退出；地块释放后不存在成员行）。
+// 与邀请/接受共用 runPlotTx 的“先锁地块行”入口，避免锁顺序交叉导致死锁。
 func (s *PlotMemberService) Leave(plotID, userID uint) (*model.Plot, error) {
 	var plot *model.Plot
 	var remaining int64
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		p, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
-			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+	err := runPlotTx(s.db, plotID, func(tx *gorm.DB) error {
+		var p model.Plot
+		if err := tx.First(&p, plotID).Error; err != nil {
+			return collabErr500("load plot", err)
 		}
-		plot = p
+		plot = &p
 		member, err := s.memberRepo.FindByPlotAndUserForUpdate(tx, plotID, userID)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return util.NewAppError(constants.CodeNotFound, 404, "您不是该地块的协作成员，或地块已释放，无法退出")
 			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("load member", err)
 		}
 		if member.Role == string(constants.PlotMemberOwner) {
 			return util.NewAppError(constants.CodeOwnerCannotLeave, 409,
 				fmt.Sprintf("用户 id=%d 是地块 %s 的认养人（角色 %s），不能以协作成员身份退出", userID, plot.Code, util.PlotMemberRoleText(member.Role)))
 		}
 		if err := s.memberRepo.DeleteByPlotAndUserWithTx(tx, plotID, userID); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("delete member", err)
 		}
 		remaining, err = s.memberRepo.CountByPlot(tx, plotID)
 		if err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("count members", err)
 		}
 		return nil
 	})

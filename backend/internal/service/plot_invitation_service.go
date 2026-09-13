@@ -15,8 +15,18 @@ import (
 	"github.com/communitygarden/server/internal/util"
 )
 
+// collabTxMaxRetries 锁竞争（死锁/锁等待/SQLite 写锁）时的有限重试次数。
+const collabTxMaxRetries = 5
+
 // PlotInvitationService 地块协作邀请服务（邀请/接受/拒绝/撤回 + 协作聚合视图）。
-// 所有写操作在事务内对 plots / plot_members / plot_invitations 加行锁。
+//
+// 并发安全约定：
+//   - 所有协作写事务必须先对 plots 行加 FOR UPDATE 锁（统一串行入口），
+//     再锁 plot_invitations / plot_members 行；杜绝“邀请”与“接受”因锁顺序相反造成的死锁。
+//   - 同一地块的写事务在地块行锁上串行化，名额计数与“待处理邀请是否已存在”的检查因此一致。
+//   - 单条邀请仅能被处理一次：第二次处理在邀请行锁 + 状态检查下返回 2015。
+//   - plot_members(plot_id,user_id) 唯一索引兜底，任何竞态都不会产生重复成员。
+//   - 死锁/锁等待错误有限重试，绝不把数据库锁错误作为 500 暴露给用户。
 type PlotInvitationService struct {
 	invRepo    repository.PlotInvitationRepository
 	memberRepo repository.PlotMemberRepository
@@ -43,27 +53,88 @@ func NewPlotInvitationService(
 	}
 }
 
-// requireActivePlot 在事务内锁定地块并校验地块仍在协作生命周期内（已认养/待释放，未释放回共享池）。
-func (s *PlotInvitationService) requireActivePlot(tx *gorm.DB, plotID uint) (*model.Plot, error) {
-	plot, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
+// collabErr500 统一包装仓储内部错误。
+func collabErr500(action string, err error) error {
+	return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).
+		Wrap(fmt.Errorf("%s: %w", action, err))
+}
+
+// runPlotTx 以“先锁地块行”为统一入口运行协作写事务，
+// 并对死锁/锁等待/SQLite 写锁冲突做有限指数退避重试。
+// 业务错误（AppError）原样返回，不重试。
+func runPlotTx(db *gorm.DB, plotID uint, fn func(tx *gorm.DB) error) error {
+	var lastErr error
+	for attempt := 0; attempt < collabTxMaxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond) // 5ms,20ms,45ms,80ms
+		}
+		lastErr = db.Transaction(func(tx *gorm.DB) error {
+			// 统一第一把锁：地块行。同一地块的协作写在此处串行。
+			var locked model.Plot
+			if err := tx.Clauses(lockForUpdate()).First(&locked, plotID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
+				}
+				return collabErr500("lock plot", err)
+			}
+			return fn(tx)
+		})
+		if lastErr == nil {
+			return nil
+		}
+		if shouldRetryCollabTx(lastErr) {
+			continue // 死锁/锁等待：回退后重试整个事务
+		}
+		return lastErr // 业务错误或其它错误：直接返回
+	}
+	return lastErr
+}
+
+// shouldRetryCollabTx 判断协作写事务是否应因锁竞争重试：
+// 裸数据库锁错误，或内部错误(5000)的根因为锁错误时重试；明确业务冲突不重试。
+func shouldRetryCollabTx(err error) bool {
+	var ae *util.AppError
+	if errors.As(err, &ae) {
+		return ae.Code == constants.CodeInternalError && util.IsRetryableLockError(err)
+	}
+	return util.IsRetryableLockError(err)
+}
+
+// lockActivePlot 校验地块仍在协作生命周期内（未释放回共享池）。
+// 调用前必须已持有地块行锁（runPlotTx）。
+func lockActivePlot(tx *gorm.DB, plotID uint) (*model.Plot, error) {
+	var plot model.Plot
+	if err := tx.First(&plot, plotID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
 		}
-		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		return nil, collabErr500("load plot", err)
 	}
 	if plot.Status == string(constants.PlotStatusAvailable) || plot.AdopterID == nil {
 		return nil, util.NewAppError(constants.CodePlotNotAdopted, 409,
 			fmt.Sprintf("地块 %s 当前状态为 %s（已释放回共享池），不能再邀请或接受协作", plot.Code, util.PlotStatusText(plot.Status)))
 	}
-	return plot, nil
+	return &plot, nil
 }
 
 // Invite 认养人邀请已注册居民共同照料地块。
 func (s *PlotInvitationService) Invite(plotID, inviterID uint, username string) (*model.PlotInvitation, error) {
+	// 用户查找在事务外完成（只读，与锁顺序无关）
+	invitee, err := s.userRepo.FindByUsername(username)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, util.NewAppError(constants.CodeNotFound, 404,
+				fmt.Sprintf("被邀请人用户名字段 username=%s 不是已注册居民", username))
+		}
+		return nil, collabErr500("find invitee", err)
+	}
+	if invitee.ID == inviterID {
+		return nil, util.NewAppError(constants.CodeCannotInviteSelf, 400, "不能邀请认养人自己协作地块")
+	}
+
 	var created *model.PlotInvitation
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		plot, err := s.requireActivePlot(tx, plotID)
+	err = runPlotTx(s.db, plotID, func(tx *gorm.DB) error {
+		plot, err := lockActivePlot(tx, plotID)
 		if err != nil {
 			return err
 		}
@@ -71,37 +142,36 @@ func (s *PlotInvitationService) Invite(plotID, inviterID uint, username string) 
 			return util.NewAppError(constants.CodeNotPlotOwner, 403,
 				fmt.Sprintf("用户 id=%d 不是地块 %s 的认养人，无权邀请协作", inviterID, plot.Code))
 		}
-		invitee, err := s.userRepo.FindByUsername(username)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return util.NewAppError(constants.CodeNotFound, 404,
-					fmt.Sprintf("被邀请人用户名字段 username=%s 不是已注册居民", username))
-			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		// 事务内复核居民状态（避免在锁外期间被禁用）
+		var u model.User
+		if err := tx.First(&u, invitee.ID).Error; err != nil {
+			return collabErr500("load invitee", err)
 		}
-		if invitee.Status != string(constants.UserStatusActive) {
+		if u.Status != string(constants.UserStatusActive) {
 			return util.NewAppError(constants.CodeUserDisabled, 409,
-				fmt.Sprintf("居民 %s（角色 %s）账号已被禁用，无法邀请协作", invitee.Username, util.RoleText(invitee.Role)))
+				fmt.Sprintf("居民 %s（角色 %s）账号已被禁用，无法邀请协作", u.Username, util.RoleText(u.Role)))
 		}
-		if invitee.ID == inviterID {
-			return util.NewAppError(constants.CodeCannotInviteSelf, 400, "不能邀请认养人自己协作地块")
+		// 已是成员 -> 明确业务冲突（唯一索引语义的预检查，地块行锁保护）
+		exists, err := s.memberRepo.MemberExistsWithTx(tx, plotID, invitee.ID)
+		if err != nil {
+			return collabErr500("check member", err)
 		}
-		// 已是成员拒绝
-		if _, err := s.memberRepo.FindByPlotAndUserForUpdate(tx, plotID, invitee.ID); err == nil {
+		if exists {
 			return util.NewAppError(constants.CodeAlreadyPlotMember, 409,
 				fmt.Sprintf("居民 %s 已是地块 %s 的协作成员，不能重复邀请", invitee.Username, plot.Code))
-		} else if !errors.Is(err, repository.ErrNotFound) {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
 		}
-		// 存在待处理邀请拒绝（重复邀请同一人）
-		if inv, err := s.invRepo.FindPendingByPlotAndInvitee(tx, plotID, invitee.ID); err == nil {
+		// 存在待处理邀请 -> 明确业务冲突（与“同时接受”并发时，地块行锁保证读到对方已提交状态）
+		var pendingCount int64
+		if err := tx.Model(&model.PlotInvitation{}).
+			Where("plot_id = ? AND invitee_id = ? AND status = ?", plotID, invitee.ID, string(constants.InvitationPending)).
+			Count(&pendingCount).Error; err != nil {
+			return collabErr500("check pending invitation", err)
+		}
+		if pendingCount > 0 {
 			return util.NewAppError(constants.CodeDuplicateInvitation, 409,
-				fmt.Sprintf("已向居民 %s 发送过待处理邀请（邀请 id=%d），请勿重复邀请", invitee.Username, inv.ID))
-		} else if !errors.Is(err, repository.ErrNotFound) {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+				fmt.Sprintf("已向居民 %s 发送过待处理邀请，请勿重复邀请", invitee.Username))
 		}
-		// 名额边界：待处理邀请不占名额，因此满员时仍允许发出邀请（等待队列），
-		// 仅在被邀请人接受瞬间按已接受成员计数校验
+		// 待处理邀请不占名额：满员也允许发出邀请（等待队列），名额仅在接受瞬间校验。
 		inv := &model.PlotInvitation{
 			PlotID:    plotID,
 			InviterID: inviterID,
@@ -109,7 +179,7 @@ func (s *PlotInvitationService) Invite(plotID, inviterID uint, username string) 
 			Status:    string(constants.InvitationPending),
 		}
 		if err := s.invRepo.CreateWithTx(tx, inv); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("create invitation", err)
 		}
 		created = inv
 		return nil
@@ -132,25 +202,35 @@ func (s *PlotInvitationService) Reject(invitationID, userID uint) (*model.PlotIn
 }
 
 func (s *PlotInvitationService) respond(invitationID, userID uint, decision constants.InvitationStatus) (*model.PlotInvitation, error) {
+	// 事务外无锁读取 plot_id，用于以“地块行锁”为统一入口；邀请存在性在事务内加锁复核。
+	head, err := s.invRepo.FindByID(invitationID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("协作邀请实体 id=%d 不存在", invitationID))
+		}
+		return nil, collabErr500("load invitation", err)
+	}
+	if head.InviteeID != userID {
+		return nil, util.NewAppError(constants.CodeNotInvitee, 403,
+			fmt.Sprintf("用户 id=%d 不是邀请 id=%d 的被邀请居民，无权接受或拒绝", userID, invitationID))
+	}
+
 	var updated *model.PlotInvitation
 	var memberCount int64
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err = runPlotTx(s.db, head.PlotID, func(tx *gorm.DB) error {
+		// 持有地块行锁后再锁邀请行：锁顺序与邀请/撤回/释放完全一致，无死锁。
 		inv, err := s.invRepo.FindByIDForUpdate(tx, invitationID)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("协作邀请实体 id=%d 不存在", invitationID))
 			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("lock invitation", err)
 		}
-		if inv.InviteeID != userID {
-			return util.NewAppError(constants.CodeNotInvitee, 403,
-				fmt.Sprintf("用户 id=%d 不是邀请 id=%d 的被邀请居民，无权接受或拒绝", userID, invitationID))
-		}
-		// 先校验地块仍在协作生命周期：地块释放后一律不能再接受或拒绝
-		plot, err := s.requireActivePlot(tx, inv.PlotID)
-		if err != nil {
+		// 地块释放后一律不能再接受或拒绝（先于状态判断，返回明确的 2010）
+		if _, err := lockActivePlot(tx, inv.PlotID); err != nil {
 			return err
 		}
+		// 同一邀请只能处理一次
 		if inv.Status != string(constants.InvitationPending) {
 			return util.NewAppError(constants.CodeInvitationNotPending, 409,
 				fmt.Sprintf("邀请 id=%d 当前状态为 %s，仅待处理邀请可接受或拒绝", invitationID, util.InvitationStatusText(inv.Status)))
@@ -159,32 +239,35 @@ func (s *PlotInvitationService) respond(invitationID, userID uint, decision cons
 		inv.Status = string(decision)
 		inv.RespondedAt = &now
 		if decision == constants.InvitationAccepted {
-			// 接受瞬间再次校验成员身份与名额（并发接受多个邀请的边界）
-			if _, err := s.memberRepo.FindByPlotAndUserForUpdate(tx, inv.PlotID, userID); err == nil {
-				return util.NewAppError(constants.CodeAlreadyPlotMember, 409, "您已是该地块的协作成员")
-			} else if !errors.Is(err, repository.ErrNotFound) {
-				return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
-			}
+			// 地块行锁串行化下，该计数为提交后的最新值，多个邀请同时接受也不会超员
 			memberCount, err = s.memberRepo.CountByPlot(tx, inv.PlotID)
 			if err != nil {
-				return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+				return collabErr500("count members", err)
 			}
 			if memberCount >= constants.MaxPlotMembers {
+				// 名额已满：邀请保持 pending（仍不占名额），等待成员退出释放名额后再接受
+				inv.Status = string(constants.InvitationPending)
+				inv.RespondedAt = nil
 				return util.NewAppError(constants.CodePlotMemberFull, 409,
-					fmt.Sprintf("地块 %s 协作名额已满：%d/%d，无法接受邀请", plot.Code, memberCount, constants.MaxPlotMembers))
+					fmt.Sprintf("协作名额已满：%d/%d，无法接受邀请（待处理邀请不占名额）", memberCount, constants.MaxPlotMembers))
 			}
-			if err := s.memberRepo.CreateWithTx(tx, &model.PlotMember{
+			newMember := &model.PlotMember{
 				PlotID:    inv.PlotID,
 				UserID:    userID,
 				Role:      string(constants.PlotMemberHelper),
 				InvitedBy: &inv.InviterID,
-			}); err != nil {
-				return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			}
+			if err := s.memberRepo.CreateWithTx(tx, newMember); err != nil {
+				if util.IsUniqueViolation(err) {
+					// 唯一索引兜底：并发下已是成员（例如同用户对同地块多条邀请同时接受）
+					return util.NewAppError(constants.CodeAlreadyPlotMember, 409, "您已是该地块的协作成员")
+				}
+				return collabErr500("add member", err)
 			}
 			memberCount++
 		}
 		if err := s.invRepo.UpdateWithTx(tx, inv); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("update invitation", err)
 		}
 		updated = inv
 		return nil
@@ -202,16 +285,23 @@ func (s *PlotInvitationService) respond(invitationID, userID uint, decision cons
 
 // Revoke 邀请人撤回待处理邀请：pending -> revoked。
 func (s *PlotInvitationService) Revoke(invitationID, operatorID uint) (*model.PlotInvitation, error) {
+	head, err := s.invRepo.FindByID(invitationID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("协作邀请实体 id=%d 不存在", invitationID))
+		}
+		return nil, collabErr500("load invitation", err)
+	}
 	var updated *model.PlotInvitation
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	err = runPlotTx(s.db, head.PlotID, func(tx *gorm.DB) error {
 		inv, err := s.invRepo.FindByIDForUpdate(tx, invitationID)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("协作邀请实体 id=%d 不存在", invitationID))
 			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("lock invitation", err)
 		}
-		plot, err := s.requireActivePlot(tx, inv.PlotID)
+		plot, err := lockActivePlot(tx, inv.PlotID)
 		if err != nil {
 			return err
 		}
@@ -227,7 +317,7 @@ func (s *PlotInvitationService) Revoke(invitationID, operatorID uint) (*model.Pl
 		inv.Status = string(constants.InvitationRevoked)
 		inv.RespondedAt = &now
 		if err := s.invRepo.UpdateWithTx(tx, inv); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("update invitation", err)
 		}
 		updated = inv
 		return nil
@@ -277,15 +367,15 @@ func (s *PlotInvitationService) GetCollaboration(plotID uint) (*dto.PlotCollabor
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
 		}
-		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		return nil, collabErr500("load plot", err)
 	}
 	members, err := s.memberRepo.ListByPlot(plotID)
 	if err != nil {
-		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		return nil, collabErr500("list members", err)
 	}
 	invitations, err := s.invRepo.ListByPlot(plotID, "")
 	if err != nil {
-		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		return nil, collabErr500("list invitations", err)
 	}
 	out := &dto.PlotCollaborationDTO{
 		Plot:        dto.ToPlotOutDTO(plot),
@@ -307,7 +397,7 @@ func (s *PlotInvitationService) GetCollaboration(plotID uint) (*dto.PlotCollabor
 func (s *PlotInvitationService) ListMine(userID uint, status string) ([]model.PlotInvitation, error) {
 	all, err := s.invRepo.ListByInvitee(userID, status)
 	if err != nil {
-		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		return nil, collabErr500("list my invitations", err)
 	}
 	return all, nil
 }

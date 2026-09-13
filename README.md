@@ -305,9 +305,9 @@ npm run dev                # http://localhost:5173，/api 代理到 29516
 
 ```bash
 cd backend
-go build ./...
-go vet ./...
-go test ./...              # service 与 repository 表驱动单元测试
+go test ./...              # service 与 repository 表驱动单元测试（含协作并发用例：TestConcurrent*）
+# 真实 HTTP 并发回归（需先启动后端；纯接口断言、可重复执行）
+scripts/concurrent_e2e.sh   # 接受×重复邀请/多邀请同时接受/同邀请处理两次/撤回×接受/释放×接受
 ```
 
 ## 📄 License

@@ -12,6 +12,7 @@ import (
 // PlotMemberRepository 地块协作成员仓储接口。
 type PlotMemberRepository interface {
 	CreateWithTx(tx *gorm.DB, m *model.PlotMember) error
+	MemberExistsWithTx(tx *gorm.DB, plotID, userID uint) (bool, error)
 	DeleteByPlotAndUserWithTx(tx *gorm.DB, plotID, userID uint) error
 	DeleteByPlotWithTx(tx *gorm.DB, plotID uint) error
 	FindByPlotAndUserForUpdate(tx *gorm.DB, plotID, userID uint) (*model.PlotMember, error)
@@ -31,6 +32,15 @@ func NewPlotMemberRepository(db *gorm.DB) PlotMemberRepository {
 
 func (r *plotMemberRepository) CreateWithTx(tx *gorm.DB, m *model.PlotMember) error {
 	return tx.Create(m).Error
+}
+
+// MemberExistsWithTx 判断用户是否已是地块成员（无锁只读；唯一索引保证最终正确性）。
+func (r *plotMemberRepository) MemberExistsWithTx(tx *gorm.DB, plotID, userID uint) (bool, error) {
+	var count int64
+	if err := tx.Model(&model.PlotMember{}).Where("plot_id = ? AND user_id = ?", plotID, userID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (r *plotMemberRepository) DeleteByPlotAndUserWithTx(tx *gorm.DB, plotID, userID uint) error {

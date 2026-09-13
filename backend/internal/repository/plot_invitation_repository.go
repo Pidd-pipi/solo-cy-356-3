@@ -12,9 +12,9 @@ import (
 // PlotInvitationRepository 地块协作邀请仓储接口。
 type PlotInvitationRepository interface {
 	CreateWithTx(tx *gorm.DB, inv *model.PlotInvitation) error
+	FindByID(id uint) (*model.PlotInvitation, error)
 	FindByIDForUpdate(tx *gorm.DB, id uint) (*model.PlotInvitation, error)
 	UpdateWithTx(tx *gorm.DB, inv *model.PlotInvitation) error
-	FindPendingByPlotAndInvitee(tx *gorm.DB, plotID, inviteeID uint) (*model.PlotInvitation, error)
 	ListByPlot(plotID uint, status string) ([]model.PlotInvitation, error)
 	ListByInvitee(inviteeID uint, status string) ([]model.PlotInvitation, error)
 	RevokeAllPendingByPlotWithTx(tx *gorm.DB, plotID uint) (int64, error)
@@ -33,7 +33,19 @@ func (r *plotInvitationRepository) CreateWithTx(tx *gorm.DB, inv *model.PlotInvi
 	return tx.Create(inv).Error
 }
 
-// FindByIDForUpdate 按主键查询邀请并加行锁（事务内）。
+// FindByID 按主键查询邀请（无锁只读，用于事务前获取 plot_id 等字段，统一锁顺序）。
+func (r *plotInvitationRepository) FindByID(id uint) (*model.PlotInvitation, error) {
+	var inv model.PlotInvitation
+	if err := r.db.First(&inv, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &inv, nil
+}
+
+// FindByIDForUpdate 按主键查询邀请并加行锁（事务内，必须在地块行锁之后调用）。
 func (r *plotInvitationRepository) FindByIDForUpdate(tx *gorm.DB, id uint) (*model.PlotInvitation, error) {
 	var inv model.PlotInvitation
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&inv, id).Error; err != nil {
@@ -47,20 +59,6 @@ func (r *plotInvitationRepository) FindByIDForUpdate(tx *gorm.DB, id uint) (*mod
 
 func (r *plotInvitationRepository) UpdateWithTx(tx *gorm.DB, inv *model.PlotInvitation) error {
 	return tx.Save(inv).Error
-}
-
-// FindPendingByPlotAndInvitee 查询指定居民在本地块的待处理邀请（重复邀请校验）。
-func (r *plotInvitationRepository) FindPendingByPlotAndInvitee(tx *gorm.DB, plotID, inviteeID uint) (*model.PlotInvitation, error) {
-	var inv model.PlotInvitation
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("plot_id = ? AND invitee_id = ? AND status = ?", plotID, inviteeID, "pending").
-		First(&inv).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &inv, nil
 }
 
 func (r *plotInvitationRepository) ListByPlot(plotID uint, status string) ([]model.PlotInvitation, error) {
