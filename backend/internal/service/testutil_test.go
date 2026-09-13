@@ -32,7 +32,8 @@ func newTestServiceDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open test db: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&model.User{}, &model.Plot{}, &model.PlantingPlan{}, &model.HarvestRecord{},
+		&model.User{}, &model.Plot{}, &model.PlotMember{}, &model.PlotInvitation{},
+		&model.PlantingPlan{}, &model.HarvestRecord{},
 		&model.DiaryEntry{}, &model.DiaryComment{}, &model.CommunityPost{}, &model.CommunityComment{},
 		&model.AuditLog{},
 	); err != nil {
@@ -72,6 +73,24 @@ func newTestPlot(t *testing.T, db *gorm.DB, code, status string, adopterID *uint
 func newPlotService(t *testing.T, db *gorm.DB) (*PlotService, repository.PlotRepository) {
 	t.Helper()
 	plotRepo := repository.NewPlotRepository(db)
-	svc := NewPlotService(plotRepo, db, testLogger())
+	memberRepo := repository.NewPlotMemberRepository(db)
+	invitationRepo := repository.NewPlotInvitationRepository(db)
+	userRepo := repository.NewUserRepository(db)
+	memberSvc := NewPlotMemberService(memberRepo, plotRepo, db, testLogger())
+	invitationSvc := NewPlotInvitationService(invitationRepo, memberRepo, plotRepo, userRepo, memberSvc, db, testLogger())
+	svc := NewPlotService(plotRepo, memberSvc, invitationSvc, db, testLogger())
 	return svc, plotRepo
+}
+
+// newPlotCollabServices 构造协作测试所需的全套服务。
+func newPlotCollabServices(t *testing.T, db *gorm.DB) (*PlotService, *PlotMemberService, *PlotInvitationService) {
+	t.Helper()
+	plotRepo := repository.NewPlotRepository(db)
+	memberRepo := repository.NewPlotMemberRepository(db)
+	invitationRepo := repository.NewPlotInvitationRepository(db)
+	userRepo := repository.NewUserRepository(db)
+	memberSvc := NewPlotMemberService(memberRepo, plotRepo, db, testLogger())
+	invitationSvc := NewPlotInvitationService(invitationRepo, memberRepo, plotRepo, userRepo, memberSvc, db, testLogger())
+	plotSvc := NewPlotService(plotRepo, memberSvc, invitationSvc, db, testLogger())
+	return plotSvc, memberSvc, invitationSvc
 }

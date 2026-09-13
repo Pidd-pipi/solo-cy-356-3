@@ -19,4 +19,12 @@ const (
 	MsgRecommendOK      = "季节作物推荐获取成功"
 	MsgStatsOK          = "年度收成统计获取成功"
 	MsgHealthOK         = "服务运行正常"
+
+	// 地块协作文案
+	MsgInvitationSentOK     = "协作邀请已发送，等待对方接受"
+	MsgInvitationAcceptedOK = "已接受邀请，成为地块协作成员"
+	MsgInvitationRejectedOK = "已拒绝该地块协作邀请"
+	MsgInvitationRevokedOK  = "待处理邀请已撤回"
+	MsgPlotMemberLeftOK     = "已退出地块协作"
+	MsgCollaborationOK      = "地块协作信息获取成功"
 )

@@ -11,6 +11,8 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/glebarez/sqlite"
+
 	"github.com/communitygarden/server/internal/config"
 	"github.com/communitygarden/server/internal/constants"
 	"github.com/communitygarden/server/internal/model"
@@ -21,6 +23,8 @@ import (
 var Models = []interface{}{
 	&model.User{},
 	&model.Plot{},
+	&model.PlotMember{},
+	&model.PlotInvitation{},
 	&model.PlantingPlan{},
 	&model.HarvestRecord{},
 	&model.DiaryEntry{},
@@ -32,19 +36,26 @@ var Models = []interface{}{
 
 // Connect 建立 PostgreSQL 连接并完成迁移与种子数据。
 func Connect(cfg *config.Config, logger *slog.Logger) (*gorm.DB, error) {
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai",
-		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBSSLMode)
 	gormWriter := gormlogger.Writer(log.New(os.Stdout, "\r\n", log.LstdFlags))
 	gormLogger := gormlogger.New(gormWriter, gormlogger.Config{
 		SlowThreshold:             500 * time.Millisecond,
 		LogLevel:                  gormlogger.Warn,
 		IgnoreRecordNotFoundError: true,
 	})
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormLogger})
+	var db *gorm.DB
+	var err error
+	if cfg.DBDriver == "sqlite" {
+		// 仅用于本地无 PostgreSQL 环境（如离线演示）；Docker 部署仍使用 PostgreSQL。
+		db, err = gorm.Open(sqlite.Open(cfg.DBName), &gorm.Config{Logger: gormLogger})
+	} else {
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai",
+			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBSSLMode)
+		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormLogger})
+	}
 	if err != nil {
 		return nil, err
 	}
-	logger.Info(constants.LogDBConnected, "host", cfg.DBHost, "port", cfg.DBPort, "db", cfg.DBName)
+	logger.Info(constants.LogDBConnected, "host", cfg.DBHost, "port", cfg.DBPort, "db", cfg.DBName, "driver", cfg.DBDriver)
 
 	if err := db.AutoMigrate(Models...); err != nil {
 		return nil, err
@@ -54,7 +65,80 @@ func Connect(cfg *config.Config, logger *slog.Logger) (*gorm.DB, error) {
 	if err := Seed(db, logger); err != nil {
 		return nil, err
 	}
+	if err := EnsureDemoResidents(db, logger); err != nil {
+		return nil, err
+	}
+	if err := EnsurePlotOwners(db, logger); err != nil {
+		return nil, err
+	}
 	return db, nil
+}
+
+// EnsurePlotOwners 幂等回填：为已认养地块（种子直建或历史数据）补登认养人 owner 成员。
+func EnsurePlotOwners(db *gorm.DB, logger *slog.Logger) error {
+	var adoptedPlots []model.Plot
+	if err := db.Where("adopter_id IS NOT NULL").Find(&adoptedPlots).Error; err != nil {
+		return err
+	}
+	backfilled := 0
+	for i := range adoptedPlots {
+		p := adoptedPlots[i]
+		if p.AdopterID == nil {
+			continue
+		}
+		var count int64
+		if err := db.Model(&model.PlotMember{}).Where("plot_id = ? AND user_id = ?", p.ID, *p.AdopterID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		if err := db.Create(&model.PlotMember{
+			PlotID: p.ID,
+			UserID: *p.AdopterID,
+			Role:   string(constants.PlotMemberOwner),
+		}).Error; err != nil {
+			return err
+		}
+		backfilled++
+	}
+	if backfilled > 0 {
+		logger.Info("plot owner members backfilled", "count", backfilled)
+	}
+	return nil
+}
+
+// EnsureDemoResidents 幂等补齐地块协作演示居民（已存在数据卷升级时使用）。
+func EnsureDemoResidents(db *gorm.DB, logger *slog.Logger) error {
+	demos := []model.User{
+		{Username: "neighbor1", Nickname: "邻居王阿姨", Email: "neighbor1@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor2", Nickname: "邻居小陈", Email: "neighbor2@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor3", Nickname: "邻居老赵", Email: "neighbor3@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor4", Nickname: "邻居小周", Email: "neighbor4@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+	}
+	created := 0
+	for i := range demos {
+		var count int64
+		if err := db.Model(&model.User{}).Where("username = ?", demos[i].Username).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		hash, err := util.HashPassword(demos[i].Username + "123")
+		if err != nil {
+			return err
+		}
+		demos[i].Password = hash
+		if err := db.Create(&demos[i]).Error; err != nil {
+			return err
+		}
+		created++
+	}
+	if created > 0 {
+		logger.Info("demo residents ensured", "created", created)
+	}
+	return nil
 }
 
 // Seed 初始化种子数据（仅当用户表为空时执行）。
@@ -71,6 +155,11 @@ func Seed(db *gorm.DB, logger *slog.Logger) error {
 		{Username: "admin", Nickname: "平台管理员", Email: "admin@communitygarden.local", Role: string(constants.RoleAdmin), Status: string(constants.UserStatusActive)},
 		{Username: "farmer", Nickname: "都市农场主老李", Email: "farmer@communitygarden.local", Role: string(constants.RoleFarmer), Status: string(constants.UserStatusActive)},
 		{Username: "citizen", Nickname: "阳台种菜小张", Email: "citizen@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		// 地块协作演示居民（密码 = 用户名 + 123），供邀请/接受/拒绝等协作流程使用
+		{Username: "neighbor1", Nickname: "邻居王阿姨", Email: "neighbor1@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor2", Nickname: "邻居小陈", Email: "neighbor2@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor3", Nickname: "邻居老赵", Email: "neighbor3@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
+		{Username: "neighbor4", Nickname: "邻居小周", Email: "neighbor4@communitygarden.local", Role: string(constants.RoleCitizen), Status: string(constants.UserStatusActive)},
 	}
 	for i := range seedUsers {
 		hash, err := util.HashPassword(seedUsers[i].Username + "123")

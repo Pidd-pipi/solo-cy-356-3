@@ -39,13 +39,65 @@
       <el-table-column label="认养人" width="120">
         <template #default="{ row }">{{ row.adopter?.nickname || row.adopter?.username || '-' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="220">
+      <el-table-column label="协作状态" width="150">
         <template #default="{ row }">
+          <template v-if="row.status !== 'available' && row.collaboration">
+            <el-tag type="success" size="small" effect="plain">
+              成员 {{ row.collaboration.member_count }}/{{ row.collaboration.max_members }}
+            </el-tag>
+            <el-tag v-if="row.collaboration.pending_invitation_count > 0" type="warning" size="small" effect="plain" style="margin-left: 4px">
+              待处理 {{ row.collaboration.pending_invitation_count }}
+            </el-tag>
+          </template>
+          <span v-else class="muted">-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="300">
+        <template #default="{ row }">
+          <el-button type="info" size="small" link @click="openDetail(row)">详情</el-button>
           <el-button v-if="row.status === 'available'" type="success" size="small" @click="adopt(row)">认养</el-button>
           <el-button v-if="canRelease(row)" type="warning" size="small" @click="release(row)">释放</el-button>
+          <el-button v-if="row.status !== 'available'" type="primary" size="small" link @click="goCollab(row)">协作管理</el-button>
         </template>
       </el-table-column>
     </DataTable>
+
+    <!-- 地块详情：含协作状态 -->
+    <el-dialog v-model="detailVisible" title="地块详情" width="640px">
+      <template v-if="detail">
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="编号">{{ detail.code }}</el-descriptions-item>
+          <el-descriptions-item label="名称">{{ detail.name }}</el-descriptions-item>
+          <el-descriptions-item label="面积">{{ formatArea(detail.area) }}</el-descriptions-item>
+          <el-descriptions-item label="状态"><StatusBadge :value="detail.status" :meta-map="PlotStatusMeta" /></el-descriptions-item>
+          <el-descriptions-item label="土壤">{{ SoilTypeText[detail.soil_type] }}</el-descriptions-item>
+          <el-descriptions-item label="日照">{{ SunlightText[detail.sunlight] }}</el-descriptions-item>
+          <el-descriptions-item label="认养人">{{ detail.adopter?.nickname || detail.adopter?.username || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="经纬度">{{ detail.latitude.toFixed(4) }}, {{ detail.longitude.toFixed(4) }}</el-descriptions-item>
+          <el-descriptions-item label="描述" :span="2">{{ detail.description || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <el-divider content-position="left">协作状态</el-divider>
+        <template v-if="detail.status !== 'available' && detail.collaboration">
+          <div class="collab-summary">
+            <el-tag type="success">成员 {{ detail.collaboration.member_count }}/{{ detail.collaboration.max_members }}</el-tag>
+            <el-tag type="warning">待处理邀请 {{ detail.collaboration.pending_invitation_count }}</el-tag>
+            <el-button type="primary" size="small" @click="goCollab(detail)">进入协作页</el-button>
+          </div>
+          <el-table :data="detail.collaboration.members" size="small" border style="margin-top: 8px">
+            <el-table-column label="居民">
+              <template #default="{ row }">{{ row.user?.nickname || row.user?.username || '-' }} <span class="muted">@{{ row.user?.username }}</span></template>
+            </el-table-column>
+            <el-table-column label="角色" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.role === 'owner' ? 'warning' : 'success'">{{ PlotMemberRoleText[row.role] || row.role }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+        <el-alert v-else type="info" :closable="false" title="地块已释放回共享池或尚未认养，暂无协作成员。" />
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="createVisible" title="新增地块（管理员）" width="520px">
       <el-form :model="createForm" label-width="90px">
@@ -76,16 +128,18 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePlotStore } from '@/stores/plot'
-import { createPlot, type Plot } from '@/api/plot'
+import { createPlot, getPlot, type Plot } from '@/api/plot'
 import { useAuth } from '@/hooks/useAuth'
 import { usePagination } from '@/hooks/usePagination'
 import DataTable from '@/components/DataTable.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
-import { PlotStatusMeta, SoilTypeText, SunlightText } from '@/constants'
+import { PlotMemberRoleText, PlotStatusMeta, SoilTypeText, SunlightText } from '@/constants'
 import { formatArea, clamp } from '@/utils/format'
 
+const router = useRouter()
 const store = usePlotStore()
 const pagination = usePagination()
 const { user, role, isAdmin } = useAuth()
@@ -93,6 +147,23 @@ const { user, role, isAdmin } = useAuth()
 const createVisible = ref(false)
 const creating = ref(false)
 const createForm = reactive({ name: '', code: '', area: 10, soil_type: 'loam', sunlight: 'full', latitude: 31.2304, longitude: 121.4737, description: '' })
+
+// 地块详情弹窗（含协作状态）
+const detailVisible = ref(false)
+const detail = ref<Plot | null>(null)
+
+async function openDetail(row: Plot) {
+  try {
+    detail.value = await getPlot(row.id)
+    detailVisible.value = true
+  } catch {
+    // request 拦截器已统一提示
+  }
+}
+
+function goCollab(row: Plot) {
+  router.push(`/plots/${row.id}/collaboration`)
+}
 
 const mapW = 600
 const mapH = 360
@@ -166,4 +237,6 @@ onMounted(fetch)
 
 <style scoped>
 .plot-map { width: 100%; height: 360px; border-radius: 8px; }
+.muted { color: #909399; font-size: 12px; margin-left: 4px; }
+.collab-summary { display: flex; align-items: center; gap: 8px; }
 </style>

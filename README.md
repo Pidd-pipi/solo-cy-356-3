@@ -25,10 +25,12 @@ docker compose up -d --build
 | `admin` | `admin123` | 管理员 |
 | `farmer` | `farmer123` | 农场主 |
 | `citizen` | `citizen123` | 城市居民 |
+| `neighbor1` ~ `neighbor4` | 同名+`123` | 城市居民（地块协作演示，供邀请/接受/拒绝） |
 
 ## ✨ 主要功能
 
 1. **地块认养与 GIS 展示**：地图展示地块分布，标注空闲/已认养/待释放状态，展示面积、土壤类型、日照条件，在线认养。
+2. **地块协作（最多 4 人）**：认养人可邀请已注册居民共同照料；被邀请人接受/拒绝，邀请人撤回待处理邀请，成员主动退出；协作状态显示在地块列表与详情，地块释放后协作自动结束。
 2. **种植计划与作物推荐**：认养后制定种植计划，按季节推荐适宜作物，生成预期收获时间线（蔬菜 45 天/水果 90 天/香草 35 天）。
 3. **种植日记图文记录**：按播种/浇水/施肥/除虫/收成记录种植过程，支持点赞与评论。
 4. **收成预警与采摘提醒**：近 7 天成熟作物自动提醒，记录采摘重量与品质，生成年度收成统计报表。
@@ -98,6 +100,7 @@ README.md
 | --- | --- | --- | --- |
 | 用户 User | `users` | `model/user.go`、`repository/user_repository.go`、`service/user_service.go`、`handler/user_handler.go`、`router/user.go` | `api/auth.ts`、`stores/auth.ts`、`pages/Login.vue`、`pages/Register.vue` |
 | 地块 Plot | `plots` | `model/plot.go`、`repository/plot_repository.go`、`service/plot_service.go`、`handler/plot_handler.go`、`router/plot.go` | `api/plot.ts`、`stores/plot.ts`、`pages/PlotMap.vue` |
+| 地块协作 PlotMember / PlotInvitation | `plot_members` / `plot_invitations` | `model/plot_member.go`、`model/plot_invitation.go`、`repository/plot_member_repository.go`、`repository/plot_invitation_repository.go`、`service/plot_member_service.go`、`service/plot_invitation_service.go`、`handler/plot_member_handler.go`、`handler/plot_invitation_handler.go`、`router/plot_member.go`、`router/plot_invitation.go` | `api/collaboration.ts`、`stores/collaboration.ts`、`pages/PlotCollaboration.vue`、`pages/MyInvitations.vue` |
 | 种植计划 PlantingPlan | `planting_plans` | `model/planting_plan.go`、`repository/planting_plan_repository.go`、`service/planting_plan_service.go`、`handler/planting_plan_handler.go`、`router/planting_plan.go` | `api/plantingPlan.ts`、`stores/plantingPlan.ts`、`pages/PlantingPlan.vue` |
 | 收成记录 HarvestRecord | `harvest_records` | `model/harvest_record.go`、`repository/harvest_record_repository.go`、`service/harvest_record_service.go`、`handler/harvest_handler.go`、`router/harvest.go` | `api/harvest.ts`、`pages/Harvest.vue` |
 | 种植日记 DiaryEntry | `diary_entries` / `diary_comments` | `model/diary_entry.go`、`repository/diary_entry_repository.go`、`service/diary_service.go`、`handler/diary_handler.go`、`router/diary.go` | `api/diary.ts`、`stores/diary.ts`、`pages/Diary.vue` |
@@ -123,6 +126,8 @@ README.md
 | DiaryAction 日记动作 | sowing / watering / fertilizing / pest_control / harvest / other | `constants/enums.go`、`model/diary_entry.go`、`dto/diary_entry_dto.go`、`util/formatters.go`、`database/database.go`、`log_templates.go` |
 | HarvestQuality 收成品质 | excellent / good / fair | `constants/enums.go`、`model/harvest_record.go`、`dto/harvest_record_dto.go`、`util/formatters.go`、`repository/harvest_record_repository.go`（分组统计）、`database/database.go` |
 | PostType 帖子类型 | experience / pest / recipe / activity | `constants/enums.go`、`model/community_post.go`、`dto/community_post_dto.go`、`repository/community_repository.go`（过滤/统计）、`util/formatters.go`、`log_templates.go`、`database/database.go`、`api/openapi.yaml` |
+| PlotMemberRole 协作角色 | owner / helper | `constants/enums.go`、`model/plot_member.go`、`dto/plot_member_dto.go`、`service/plot_member_service.go`、`service/plot_invitation_service.go`、`util/formatters.go`、`database/database.go`（认养回填）、前端 `constants/index.ts`、`pages/PlotCollaboration.vue` |
+| InvitationStatus 邀请状态 | pending / accepted / rejected / revoked | `constants/enums.go`、`model/plot_invitation.go`、`dto/plot_invitation_dto.go`、`service/plot_invitation_service.go`（邀请状态机）、`repository/plot_invitation_repository.go`、`util/formatters.go`、`log_templates.go`、`error_codes.go`（2010–2018）、`api/openapi.yaml`、前端 `constants/index.ts`、`pages/PlotCollaboration.vue`、`pages/MyInvitations.vue` |
 
 > 状态机必须跨多处定义：核心状态流转规则在 `service/planting_plan_service.go` 状态机、前端 `constants/index.ts` 按钮显隐、`util/formatters.go`、`log_templates.go`、`error_codes.go` 中同时存在。新增一个状态值需要修改至少 10 处文件（牵一发动全身）。
 
@@ -151,8 +156,21 @@ README.md
 | GET | `/plots/:id` | 地块详情 | 公开 |
 | POST | `/plots` | 创建地块 | 管理员 |
 | PUT | `/plots/:id` | 更新地块 | 管理员 |
-| POST | `/plots/:id/adopt` | 认养地块（事务 + FOR UPDATE） | 登录 |
-| POST | `/plots/:id/release` | 释放地块 | 认养人/管理员 |
+| POST | `/plots/:id/adopt` | 认养地块（事务 + FOR UPDATE，自动登记 owner 成员） | 登录 |
+| POST | `/plots/:id/release` | 释放地块（同事务清空成员、撤回待处理邀请） | 认养人/管理员 |
+
+### 地块协作（最多 4 人，待处理邀请不占名额）
+| 方法 | 路径 | 说明 | 鉴权 |
+| --- | --- | --- | --- |
+| GET | `/plots/:id/collaboration` | 协作页：地块 + 成员名单 + 全部邀请 | 登录 |
+| POST | `/plots/:id/invitations` | 认养人邀请已注册居民（body: `{"username":"neighbor1"}`） | 认养人 |
+| POST | `/plots/:id/members/leave` | 已接受成员主动退出（owner 不可退出） | 登录 |
+| GET | `/my/plot-invitations?status=` | 当前居民收到的邀请（pending/全部） | 登录 |
+| POST | `/plot-invitations/:id/accept` | 被邀请人接受（释放后/满员拒绝） | 被邀请人 |
+| POST | `/plot-invitations/:id/reject` | 被邀请人拒绝（不占名额，之后可再邀请） | 被邀请人 |
+| POST | `/plot-invitations/:id/revoke` | 认养人撤回待处理邀请 | 认养人 |
+
+> 协作规则：单地块最多 4 名成员（含认养人）；待处理邀请不占名额，满员时仍可邀请但接受瞬间按成员数拦截（错误码 2014）；重复向同一人发待处理邀请返回 2012；已是成员返回 2013；地块释放回共享池后邀请/接受/撤回一律返回 2010。地块详情与列表的 `collaboration` 字段携带 `member_count/max_members/pending_invitation_count/members`。
 
 ### 种植计划
 | 方法 | 路径 | 说明 | 鉴权 |
@@ -242,6 +260,17 @@ curl -s "http://localhost:29516/api/v1/stats/annual?year=2026" \
 # 8. 审计日志（管理员）
 curl -s "http://localhost:29516/api/v1/audit-logs" \
   -H "Authorization: Bearer $TOKEN"
+
+# 9. 地块协作：认养人邀请居民（P-001 需先由该用户认养）
+curl -s -X POST http://localhost:29516/api/v1/plots/1/invitations \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"username":"neighbor1"}'
+# 10. 查看协作页（成员 + 全部邀请 + 名额）
+curl -s http://localhost:29516/api/v1/plots/1/collaboration -H "Authorization: Bearer $TOKEN"
+# 11. 被邀请人接受 / 拒绝（:id 为邀请 id）；认养人撤回
+curl -s -X POST http://localhost:29516/api/v1/plot-invitations/1/accept -H "Authorization: Bearer $NEIGHBOR_TOKEN"
+# 12. 协作成员主动退出
+curl -s -X POST http://localhost:29516/api/v1/plots/1/members/leave -H "Authorization: Bearer $NEIGHBOR_TOKEN"
 ```
 
 ## 🐳 Docker 部署说明
@@ -266,6 +295,11 @@ cd frontend
 npm install
 npm run dev                # http://localhost:5173，/api 代理到 29516
 ```
+
+> 无 PostgreSQL 的本地演示：后端支持 `DB_DRIVER=sqlite`（默认仍为 postgres，Docker Compose 不受影响），用文件数据库即可直接启动并持久化：
+> ```bash
+> DB_DRIVER=sqlite DB_NAME=./garden.db SERVER_PORT=29516 go run ./cmd/server
+> ```
 
 ## 🧪 测试与质量
 

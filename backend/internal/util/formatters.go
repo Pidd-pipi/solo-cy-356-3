@@ -48,6 +48,34 @@ func PlotStatusText(s string) string {
 	}
 }
 
+// PlotMemberRoleText 地块协作成员角色中文文本。
+func PlotMemberRoleText(r string) string {
+	switch constants.PlotMemberRole(r) {
+	case constants.PlotMemberOwner:
+		return "认养人"
+	case constants.PlotMemberHelper:
+		return "协作成员"
+	default:
+		return "未知角色"
+	}
+}
+
+// InvitationStatusText 协作邀请状态中文文本。
+func InvitationStatusText(s string) string {
+	switch constants.InvitationStatus(s) {
+	case constants.InvitationPending:
+		return "待处理"
+	case constants.InvitationAccepted:
+		return "已接受"
+	case constants.InvitationRejected:
+		return "已拒绝"
+	case constants.InvitationRevoked:
+		return "已撤回"
+	default:
+		return "未知状态"
+	}
+}
+
 // PlanStatusText 种植计划状态中文文本。
 func PlanStatusText(s string) string {
 	switch constants.PlanStatus(s) {

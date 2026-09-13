@@ -16,14 +16,16 @@ import (
 
 // PlotService 地块服务（认养使用事务 + SELECT FOR UPDATE）。
 type PlotService struct {
-	plotRepo repository.PlotRepository
-	db       *gorm.DB
-	logger   *slog.Logger
+	plotRepo      repository.PlotRepository
+	memberSvc     *PlotMemberService
+	invitationSvc *PlotInvitationService
+	db            *gorm.DB
+	logger        *slog.Logger
 }
 
 // NewPlotService 构造地块服务。
-func NewPlotService(plotRepo repository.PlotRepository, db *gorm.DB, logger *slog.Logger) *PlotService {
-	return &PlotService{plotRepo: plotRepo, db: db, logger: logger}
+func NewPlotService(plotRepo repository.PlotRepository, memberSvc *PlotMemberService, invitationSvc *PlotInvitationService, db *gorm.DB, logger *slog.Logger) *PlotService {
+	return &PlotService{plotRepo: plotRepo, memberSvc: memberSvc, invitationSvc: invitationSvc, db: db, logger: logger}
 }
 
 // GetByID 查询地块详情（被地块 handler 与种植计划 service 复用）。
@@ -36,6 +38,19 @@ func (s *PlotService) GetByID(id uint) (*model.Plot, error) {
 		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
 	}
 	return p, nil
+}
+
+// GetDetailDTO 查询地块详情并附加协作状态（成员名单/名额/待处理邀请数），供地块详情接口使用。
+func (s *PlotService) GetDetailDTO(id uint) (*dto.PlotOutDTO, error) {
+	p, err := s.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+	out := dto.ToPlotOutDTO(p)
+	if err := s.invitationSvc.AttachSummary(out); err != nil {
+		return nil, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+	}
+	return out, nil
 }
 
 // Create 创建地块（管理员）。
@@ -109,6 +124,23 @@ func (s *PlotService) List(pq util.PageQuery, status string) ([]model.Plot, int6
 	return plots, total, nil
 }
 
+// ListDetailDTOs 分页查询地块并为每行附加协作状态摘要（列表页协作状态列复用邀请服务）。
+func (s *PlotService) ListDetailDTOs(pq util.PageQuery, status string) ([]*dto.PlotOutDTO, int64, error) {
+	plots, total, err := s.List(pq, status)
+	if err != nil {
+		return nil, 0, err
+	}
+	list := make([]*dto.PlotOutDTO, 0, len(plots))
+	for i := range plots {
+		out := dto.ToPlotOutDTO(&plots[i])
+		if err := s.invitationSvc.AttachSummary(out); err != nil {
+			return nil, 0, util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		}
+		list = append(list, out)
+	}
+	return list, total, nil
+}
+
 // Adopt 认养地块（事务 + 行锁，available -> adopted）。
 func (s *PlotService) Adopt(plotID, userID uint, role, username string) (*model.Plot, error) {
 	var adopted *model.Plot
@@ -128,6 +160,10 @@ func (s *PlotService) Adopt(plotID, userID uint, role, username string) (*model.
 		if err := s.plotRepo.UpdateWithTx(tx, plot); err != nil {
 			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
 		}
+		// 认养人自动成为地块协作 owner 成员（占用 1/4 名额）
+		if err := s.memberSvc.EnsureOwner(tx, plot.ID, userID); err != nil {
+			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		}
 		adopted = plot
 		return nil
 	})
@@ -139,8 +175,10 @@ func (s *PlotService) Adopt(plotID, userID uint, role, username string) (*model.
 }
 
 // Release 释放地块（管理员或认养人，harvested -> available）。
+// 同一事务内清空全部协作成员并撤回全部待处理邀请：释放后不能再邀请或接受。
 func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*model.Plot, error) {
 	var released *model.Plot
+	var resetMembers, resetInvitations int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		plot, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
 		if err != nil {
@@ -155,6 +193,14 @@ func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*mo
 		if plot.Status != string(constants.PlotStatusHarvested) {
 			return util.NewAppError(constants.CodePlotNotAvailable, 409, fmt.Sprintf("地块 %s 当前状态为 %s，仅待释放状态可释放", plot.Code, util.PlotStatusText(plot.Status)))
 		}
+		resetMembers, err = s.memberSvc.ResetOnRelease(tx, plotID)
+		if err != nil {
+			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		}
+		resetInvitations, err = s.invitationSvc.RevokeAllPendingOnRelease(tx, plotID)
+		if err != nil {
+			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		}
 		plot.Status = string(constants.PlotStatusAvailable)
 		plot.AdopterID = nil
 		if err := s.plotRepo.UpdateWithTx(tx, plot); err != nil {
@@ -167,6 +213,9 @@ func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*mo
 		return nil, err
 	}
 	s.logger.Info(constants.LogPlotReleased, "plot_id", released.ID, "code", released.Code, "operator", operatorID)
+	if resetMembers > 0 || resetInvitations > 0 {
+		s.logger.Info(constants.LogPlotCollabReset, "plot_id", released.ID, "members", resetMembers, "invitations", resetInvitations)
+	}
 	return released, nil
 }
 

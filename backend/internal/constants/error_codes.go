@@ -22,6 +22,17 @@ const (
 	CodeDuplicateUsername    = 2007
 	CodeInvalidCredentials   = 2008
 	CodeUserDisabled         = 2009
+
+	// 地块协作错误码
+	CodePlotNotAdopted        = 2010 // 地块未被认养（已释放回共享池）
+	CodeNotPlotOwner          = 2011 // 非认养人无权邀请/撤回
+	CodeDuplicateInvitation   = 2012 // 对同一居民存在待处理邀请
+	CodeAlreadyPlotMember     = 2013 // 该居民已是地块成员
+	CodePlotMemberFull        = 2014 // 协作名额已满（最多 4 人）
+	CodeInvitationNotPending  = 2015 // 邀请不是待处理状态
+	CodeNotInvitee            = 2016 // 仅被邀请人可接受/拒绝
+	CodeOwnerCannotLeave      = 2017 // 认养人不能以成员身份退出
+	CodeCannotInviteSelf      = 2018 // 不能邀请自己
 )
 
 // ErrorText 错误码默认文案（service/handler 可覆盖拼接更具体的 message）
@@ -44,4 +55,13 @@ var ErrorText = map[int]string{
 	CodeDuplicateUsername: "用户名已被占用",
 	CodeInvalidCredentials: "用户名或密码错误",
 	CodeUserDisabled:      "账号已被禁用",
+	CodePlotNotAdopted:    "地块未被认养（已释放回共享池），无法进行协作操作",
+	CodeNotPlotOwner:      "仅地块认养人可执行该协作操作",
+	CodeDuplicateInvitation: "已向该居民发送过待处理邀请，请勿重复邀请",
+	CodeAlreadyPlotMember: "该居民已是本地块协作成员",
+	CodePlotMemberFull:    "协作名额已满（最多 4 人）",
+	CodeInvitationNotPending: "邀请已处理或已撤回，无法再次操作",
+	CodeNotInvitee:        "仅被邀请居民本人可接受或拒绝邀请",
+	CodeOwnerCannotLeave:  "认养人不能退出自己的地块，请先释放地块",
+	CodeCannotInviteSelf:  "不能邀请自己协作地块",
 }

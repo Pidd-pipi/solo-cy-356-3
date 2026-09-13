@@ -42,6 +42,7 @@ type PlotOutDTO struct {
 	AdopterID   *uint       `json:"adopter_id"`
 	Adopter     *UserOutDTO `json:"adopter"`
 	Description string      `json:"description"`
+	Collaboration *PlotCollaborationSummaryDTO `json:"collaboration,omitempty"`
 	CreatedAt   string      `json:"created_at"`
 }
 

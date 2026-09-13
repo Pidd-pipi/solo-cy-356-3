@@ -30,6 +30,27 @@ const (
 	PlotStatusHarvested PlotStatus = "harvested" // 已收成待释放
 )
 
+// PlotMemberRole 地块协作成员角色
+type PlotMemberRole string
+
+const (
+	PlotMemberOwner  PlotMemberRole = "owner"  // 认养人（地块主人）
+	PlotMemberHelper PlotMemberRole = "helper" // 协作成员
+)
+
+// InvitationStatus 地块协作邀请状态机：pending -> accepted / rejected / revoked
+type InvitationStatus string
+
+const (
+	InvitationPending  InvitationStatus = "pending"  // 待处理（不占名额）
+	InvitationAccepted InvitationStatus = "accepted" // 已接受
+	InvitationRejected InvitationStatus = "rejected" // 已拒绝
+	InvitationRevoked  InvitationStatus = "revoked"  // 已撤回
+)
+
+// MaxPlotMembers 单个地块最多协作人数（含认养人本人）。
+const MaxPlotMembers = 4
+
 // SoilType 土壤类型
 type SoilType string
 

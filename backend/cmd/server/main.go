@@ -55,6 +55,8 @@ func main() {
 	// 仓储
 	userRepo := repository.NewUserRepository(db)
 	plotRepo := repository.NewPlotRepository(db)
+	memberRepo := repository.NewPlotMemberRepository(db)
+	invitationRepo := repository.NewPlotInvitationRepository(db)
 	planRepo := repository.NewPlantingPlanRepository(db)
 	harvestRepo := repository.NewHarvestRecordRepository(db)
 	diaryRepo := repository.NewDiaryRepository(db)
@@ -64,7 +66,9 @@ func main() {
 	// 服务
 	authService := service.NewAuthService(userRepo, logger, cfg.JWTSecret, cfg.JWTExpireHours)
 	userService := service.NewUserService(userRepo, logger)
-	plotService := service.NewPlotService(plotRepo, db, logger)
+	memberService := service.NewPlotMemberService(memberRepo, plotRepo, db, logger)
+	invitationService := service.NewPlotInvitationService(invitationRepo, memberRepo, plotRepo, userRepo, memberService, db, logger)
+	plotService := service.NewPlotService(plotRepo, memberService, invitationService, db, logger)
 	auditService := service.NewAuditService(auditRepo, logger)
 	planService := service.NewPlantingPlanService(planRepo, plotRepo, plotService, db, logger)
 	harvestService := service.NewHarvestRecordService(harvestRepo, planRepo, db, logger)
@@ -76,6 +80,8 @@ func main() {
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(userService, auditService)
 	plotHandler := handler.NewPlotHandler(plotService, auditService)
+	plotMemberHandler := handler.NewPlotMemberHandler(memberService, auditService)
+	plotInvitationHandler := handler.NewPlotInvitationHandler(invitationService, auditService)
 	planHandler := handler.NewPlantingPlanHandler(planService, harvestService)
 	harvestHandler := handler.NewHarvestHandler(harvestService, auditService)
 	diaryHandler := handler.NewDiaryHandler(diaryService)
@@ -87,7 +93,8 @@ func main() {
 
 	appRouter := router.New(
 		cfg, logger, rdb,
-		authHandler, userHandler, plotHandler, planHandler, harvestHandler,
+		authHandler, userHandler, plotHandler, plotMemberHandler, plotInvitationHandler,
+		planHandler, harvestHandler,
 		diaryHandler, communityHandler, auditHandler, statsHandler,
 		auditService, hub,
 	)

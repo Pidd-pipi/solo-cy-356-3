@@ -24,6 +24,8 @@ type Router struct {
 	authHandler     *handler.AuthHandler
 	userHandler     *handler.UserHandler
 	plotHandler     *handler.PlotHandler
+	plotMemberHandler *handler.PlotMemberHandler
+	plotInvitationHandler *handler.PlotInvitationHandler
 	planHandler     *handler.PlantingPlanHandler
 	harvestHandler  *handler.HarvestHandler
 	diaryHandler    *handler.DiaryHandler
@@ -43,6 +45,8 @@ func New(
 	authHandler *handler.AuthHandler,
 	userHandler *handler.UserHandler,
 	plotHandler *handler.PlotHandler,
+	plotMemberHandler *handler.PlotMemberHandler,
+	plotInvitationHandler *handler.PlotInvitationHandler,
 	planHandler *handler.PlantingPlanHandler,
 	harvestHandler *handler.HarvestHandler,
 	diaryHandler *handler.DiaryHandler,
@@ -55,6 +59,7 @@ func New(
 	return &Router{
 		cfg: cfg, logger: logger, rdb: rdb,
 		authHandler: authHandler, userHandler: userHandler, plotHandler: plotHandler,
+		plotMemberHandler: plotMemberHandler, plotInvitationHandler: plotInvitationHandler,
 		planHandler: planHandler, harvestHandler: harvestHandler, diaryHandler: diaryHandler,
 		communityHandler: communityHandler, auditHandler: auditHandler, statsHandler: statsHandler,
 		auditService: auditService, hub: hub,
@@ -85,6 +90,8 @@ func (r *Router) Build() *gin.Engine {
 	r.registerAuth(v1)
 	r.registerUsers(v1)
 	r.registerPlots(v1)
+	r.registerPlotMembers(v1)
+	r.registerPlotInvitations(v1)
 	r.registerPlantingPlans(v1)
 	r.registerHarvests(v1)
 	r.registerDiaries(v1)

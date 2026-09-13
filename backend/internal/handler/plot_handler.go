@@ -61,35 +61,31 @@ func (h *PlotHandler) Update(c *gin.Context) {
 	util.OK(c, dto.ToPlotOutDTO(p))
 }
 
-// List 地块分页列表（公开）。
+// List 地块分页列表（公开，每行含协作状态摘要）。
 func (h *PlotHandler) List(c *gin.Context) {
 	pq := util.ParsePageQuery(c)
 	status := c.Query("status")
-	plots, total, err := h.plotService.List(pq, status)
+	list, total, err := h.plotService.ListDetailDTOs(pq, status)
 	if err != nil {
 		util.FailWithAppError(c, err)
 		return
 	}
-	list := make([]*dto.PlotOutDTO, 0, len(plots))
-	for i := range plots {
-		list = append(list, dto.ToPlotOutDTO(&plots[i]))
-	}
 	util.OK(c, util.PageResult{List: list, Total: total, Page: pq.Page, PageSize: pq.PageSize})
 }
 
-// Get 地块详情。
+// Get 地块详情（含协作状态：成员名单、名额、待处理邀请数）。
 func (h *PlotHandler) Get(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		util.Fail(c, http.StatusBadRequest, constants.CodeBadRequest, "路径参数 id 必须为正整数")
 		return
 	}
-	p, err := h.plotService.GetByID(uint(id))
+	out, err := h.plotService.GetDetailDTO(uint(id))
 	if err != nil {
 		util.FailWithAppError(c, err)
 		return
 	}
-	util.OK(c, dto.ToPlotOutDTO(p))
+	util.OK(c, out)
 }
 
 // Adopt 认养地块（登录用户）。

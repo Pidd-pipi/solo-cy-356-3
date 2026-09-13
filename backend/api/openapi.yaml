@@ -8,6 +8,7 @@ servers:
 tags:
   - name: auth
   - name: plots
+  - name: plot-collaboration
   - name: planting-plans
   - name: harvests
   - name: diaries
@@ -52,7 +53,57 @@ paths:
   /plots/{id}/release:
     post:
       tags: [plots]
-      summary: 释放地块
+      summary: 释放地块（同事务清空协作成员并撤回待处理邀请）
+      responses: { '200': { description: 成功 } }
+  /plots/{id}/collaboration:
+    get:
+      tags: [plot-collaboration]
+      summary: 协作页聚合视图（地块 + 成员名单 + 全部邀请）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: 成功 } }
+  /plots/{id}/invitations:
+    post:
+      tags: [plot-collaboration]
+      summary: 认养人邀请已注册居民协作（最多 4 人，pending 不占名额，重复邀请拒绝）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string, example: neighbor1 }
+      responses: { '200': { description: 成功 } }
+  /plots/{id}/members/leave:
+    post:
+      tags: [plot-collaboration]
+      summary: 已接受协作成员主动退出（认养人 owner 不可退出）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: 成功 } }
+  /plot-invitations/{id}/accept:
+    post:
+      tags: [plot-collaboration]
+      summary: 被邀请人接受邀请（地块释放后禁止；满员返回 2014）
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: 成功 } }
+  /plot-invitations/{id}/reject:
+    post:
+      tags: [plot-collaboration]
+      summary: 被邀请人拒绝邀请
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: 成功 } }
+  /plot-invitations/{id}/revoke:
+    post:
+      tags: [plot-collaboration]
+      summary: 认养人撤回待处理邀请
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { description: 成功 } }
+  /my/plot-invitations:
+    get:
+      tags: [plot-collaboration]
+      summary: 当前居民收到的协作邀请（?status=pending 可过滤）
       responses: { '200': { description: 成功 } }
   /planting-plans:
     get:

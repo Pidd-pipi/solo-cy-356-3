@@ -14,6 +14,23 @@ export const PlotStatusMeta: Record<string, { label: string; type: 'success' | '
   harvested: { label: '待释放', type: 'info' }
 }
 
+// 单个地块最多协作人数（含认养人，与后端 constants.MaxPlotMembers 对应）
+export const MaxPlotMembers = 4
+
+export type PlotMemberRole = 'owner' | 'helper'
+export const PlotMemberRoleText: Record<string, string> = {
+  owner: '认养人',
+  helper: '协作成员'
+}
+
+export type InvitationStatus = 'pending' | 'accepted' | 'rejected' | 'revoked'
+export const InvitationStatusMeta: Record<string, { label: string; type: 'success' | 'warning' | 'info' | 'danger' | 'primary' }> = {
+  pending: { label: '待处理', type: 'warning' },
+  accepted: { label: '已接受', type: 'success' },
+  rejected: { label: '已拒绝', type: 'info' },
+  revoked: { label: '已撤回', type: 'danger' }
+}
+
 export type PlanStatus = 'planned' | 'planting' | 'growing' | 'harvesting' | 'completed'
 export const PlanStatusMeta: Record<string, { label: string; type: 'success' | 'warning' | 'info' | 'danger' | 'primary' }> = {
   planned: { label: '已计划', type: 'info' },

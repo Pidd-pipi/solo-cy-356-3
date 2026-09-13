@@ -37,4 +37,12 @@ const (
 	LogValidationFailed       = "validation failed, entity=%s field=%s role=%s err=%v"
 	LogInternalError          = "internal error, request_id=%s err=%v"
 	LogPanicRecovered         = "panic recovered, request_id=%s err=%v"
+
+	// 地块协作日志模板（字段变更需同步 service 调用处）
+	LogPlotInvitationSent     = "plot invitation sent, invitation_id=%d plot_id=%d inviter_id=%d invitee_id=%d"
+	LogPlotInvitationAccepted = "plot invitation accepted, invitation_id=%d plot_id=%d invitee_id=%d member_count=%d"
+	LogPlotInvitationRejected = "plot invitation rejected, invitation_id=%d plot_id=%d invitee_id=%d"
+	LogPlotInvitationRevoked  = "plot invitation revoked, invitation_id=%d plot_id=%d operator_id=%d"
+	LogPlotMemberLeft         = "plot member left, plot_id=%d member_id=%d remaining=%d"
+	LogPlotCollabReset        = "plot collaboration reset on release, plot_id=%d members=%d invitations=%d"
 )

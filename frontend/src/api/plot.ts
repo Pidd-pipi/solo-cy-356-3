@@ -1,5 +1,6 @@
 import { get, post } from '@/utils/request'
 import type { UserInfo } from './auth'
+import type { PlotMember } from './collaboration'
 
 export interface Plot {
   id: number
@@ -14,6 +15,12 @@ export interface Plot {
   adopter_id: number | null
   adopter: UserInfo | null
   description: string
+  collaboration?: {
+    member_count: number
+    max_members: number
+    pending_invitation_count: number
+    members: PlotMember[]
+  }
   created_at: string
 }
 

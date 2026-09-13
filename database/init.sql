@@ -125,3 +125,32 @@ CREATE INDEX IF NOT EXISTS idx_harvest_user ON harvest_records(user_id);
 CREATE INDEX IF NOT EXISTS idx_diary_user ON diary_entries(user_id);
 CREATE INDEX IF NOT EXISTS idx_posts_type ON community_posts(post_type);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(username);
+
+-- 地块协作成员（认养人 owner + 协作成员 helper，单地块最多 4 人）
+CREATE TABLE IF NOT EXISTS plot_members (
+    id BIGSERIAL PRIMARY KEY,
+    plot_id BIGINT NOT NULL REFERENCES plots(id),
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    role VARCHAR(32) NOT NULL DEFAULT 'helper',
+    invited_by BIGINT REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uniq_plot_member UNIQUE (plot_id, user_id)
+);
+
+-- 地块协作邀请（pending 不占名额；accepted/rejected/revoked 为终态）
+CREATE TABLE IF NOT EXISTS plot_invitations (
+    id BIGSERIAL PRIMARY KEY,
+    plot_id BIGINT NOT NULL REFERENCES plots(id),
+    inviter_id BIGINT NOT NULL REFERENCES users(id),
+    invitee_id BIGINT NOT NULL REFERENCES users(id),
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    responded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_plot_members_plot ON plot_members(plot_id);
+CREATE INDEX IF NOT EXISTS idx_plot_members_user ON plot_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_plot_invitations_plot ON plot_invitations(plot_id);
+CREATE INDEX IF NOT EXISTS idx_plot_invitations_invitee_status ON plot_invitations(invitee_id, status);

@@ -11,6 +11,7 @@ type Config struct {
 	LogLevel       string `env:"LOG_LEVEL" envDefault:"info"`
 	DBHost         string `env:"DB_HOST" envDefault:"127.0.0.1"`
 	DBPort         string `env:"DB_PORT" envDefault:"5432"`
+	DBDriver       string `env:"DB_DRIVER" envDefault:"postgres"` // postgres（部署默认）/ sqlite（仅本地无数据库环境）
 	DBName         string `env:"DB_NAME" envDefault:"communitygarden_db"`
 	DBUser         string `env:"DB_USER" envDefault:"communitygarden_user"`
 	DBPassword     string `env:"DB_PASSWORD" envDefault:"communitygarden_pwd"`
