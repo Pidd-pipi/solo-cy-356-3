@@ -61,7 +61,7 @@ func collabErr500(action string, err error) error {
 
 // runPlotTx 以“先锁地块行”为统一入口运行协作写事务，
 // 并对死锁/锁等待/SQLite 写锁冲突做有限指数退避重试。
-// 业务错误（AppError）原样返回，不重试。
+// 业务错误（AppError）原样返回，不重试；锁错误重试耗尽后统一转为 5000。
 func runPlotTx(db *gorm.DB, plotID uint, fn func(tx *gorm.DB) error) error {
 	var lastErr error
 	for attempt := 0; attempt < collabTxMaxRetries; attempt++ {
@@ -87,7 +87,9 @@ func runPlotTx(db *gorm.DB, plotID uint, fn func(tx *gorm.DB) error) error {
 		}
 		return lastErr // 业务错误或其它错误：直接返回
 	}
-	return lastErr
+	// 锁竞争在最大次数内仍未成功：返回规范的 5000（不向调用方泄漏底层锁错误）
+	return util.NewAppError(constants.CodeInternalError, 500,
+		constants.ErrorText[constants.CodeInternalError]).Wrap(fmt.Errorf("协作事务锁竞争重试耗尽: %w", lastErr))
 }
 
 // shouldRetryCollabTx 判断协作写事务是否应因锁竞争重试：
