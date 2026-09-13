@@ -255,7 +255,8 @@ func TestRetry_LockContentionThenSuccess(t *testing.T) {
 	assertInvStatus(t, db, inv.ID, string(constants.InvitationAccepted))
 }
 
-// TestRetry_LockAlwaysFails 锁竞争持续失败：重试上限后返回 5000，所有尝试回滚，数据保持原状。
+// TestRetry_LockAlwaysFails 锁竞争持续失败：重试上限后返回明确的“繁忙排队”1007(503)，
+// 所有尝试回滚，数据保持原状（不暴露成 500）。
 func TestRetry_LockAlwaysFails(t *testing.T) {
 	db := newTestServiceDB(t)
 	owner := newTestUser(t, db, "lx1", "citizen")
@@ -269,7 +270,10 @@ func TestRetry_LockAlwaysFails(t *testing.T) {
 	_, _, retrySvc := newFaultableServices(t, db, faultMember, faultInv)
 
 	_, err := retrySvc.Accept(inv.ID, u.ID)
-	assertErrCode(t, err, constants.CodeInternalError)
+	assertErrCode(t, err, constants.CodeServiceBusy)
+	if httpStatusOf(err) != 503 {
+		t.Fatalf("lock exhaustion http status=%d want 503", httpStatusOf(err))
+	}
 
 	if c := faultInv.updateCalls.Load(); c != int32(collabTxMaxRetries) {
 		t.Fatalf("update calls=%d want %d", c, collabTxMaxRetries)
@@ -279,6 +283,57 @@ func TestRetry_LockAlwaysFails(t *testing.T) {
 	assertMemberCount(t, db, plot.ID, 1)
 	assertNoMember(t, db, plot.ID, u.ID)
 	assertNoDuplicateMembers(t, db, plot.ID)
+}
+
+// TestRetry_PoolExhaustedReturnsBusy 连接池耗尽/too many clients：重试耗尽返回 1007/503，而非 500。
+func TestRetry_PoolExhaustedReturnsBusy(t *testing.T) {
+	db := newTestServiceDB(t)
+	owner := newTestUser(t, db, "pe1", "citizen")
+	u := newTestUser(t, db, "pe2", "citizen")
+	plot := newTestPlot(t, db, "P-PE", "available", nil)
+	_, _, inv := adoptAndInvite(t, db, plot, owner.ID, "pe2")
+
+	// 模拟 PostgreSQL too_many_connections（53300）
+	exhausted := &pgconn.PgError{Code: "53300", Message: "too many clients already"}
+	if !util.IsPoolOrConnExhausted(exhausted) {
+		t.Fatalf("53300 must be classified pool exhausted")
+	}
+	repo := &poolExhaustedInvRepo{PlotInvitationRepository: repository.NewPlotInvitationRepository(db)}
+	repo.remain = collabTxMaxRetries
+	repo.fail = exhausted
+	faultMember := &faultMemberRepo{PlotMemberRepository: repository.NewPlotMemberRepository(db)}
+	_, _, retrySvc := newFaultableServices(t, db, faultMember, repo)
+
+	_, err := retrySvc.Accept(inv.ID, u.ID)
+	assertErrCode(t, err, constants.CodeServiceBusy)
+	if httpStatusOf(err) != 503 {
+		t.Fatalf("pool exhaustion http status=%d want 503", httpStatusOf(err))
+	}
+	assertInvStatus(t, db, inv.ID, string(constants.InvitationPending))
+	assertMemberCount(t, db, plot.ID, 1)
+}
+
+type poolExhaustedInvRepo struct {
+	repository.PlotInvitationRepository
+	remain int
+	fail   error
+	calls  int
+}
+
+func (r *poolExhaustedInvRepo) UpdateWithTx(tx *gorm.DB, inv *model.PlotInvitation) error {
+	r.calls++
+	if r.remain > 0 {
+		r.remain--
+		return r.fail
+	}
+	return r.PlotInvitationRepository.UpdateWithTx(tx, inv)
+}
+
+func httpStatusOf(err error) int {
+	if ae, ok := err.(*util.AppError); ok {
+		return ae.HTTPStatus
+	}
+	return 0
 }
 
 // TestRetry_PGDeadlockRetried PostgreSQL 40P01 死锁错误同样触发回滚重试，第二次成功。

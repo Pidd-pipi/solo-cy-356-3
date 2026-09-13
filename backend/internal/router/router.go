@@ -78,7 +78,7 @@ func (r *Router) Build() *gin.Engine {
 	engine.Use(middleware.ErrorHandler(r.logger))
 	engine.Use(middleware.RequestLog(r.logger))
 	engine.Use(middleware.CORS())
-	engine.Use(middleware.RateLimit(r.rdb, r.logger, 300, time.Minute))
+	engine.Use(middleware.RateLimit(r.rdb, r.logger, r.cfg.RateLimitPerMin, time.Minute))
 	engine.Use(middleware.Audit(r.auditService, r.logger))
 
 	// 健康检查

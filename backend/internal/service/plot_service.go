@@ -141,30 +141,27 @@ func (s *PlotService) ListDetailDTOs(pq util.PageQuery, status string) ([]*dto.P
 	return list, total, nil
 }
 
-// Adopt 认养地块（事务 + 行锁，available -> adopted）。
+// Adopt 认养地块（统一地块行锁入口 + 资源重试，available -> adopted）。
 func (s *PlotService) Adopt(plotID, userID uint, role, username string) (*model.Plot, error) {
 	var adopted *model.Plot
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		plot, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
-			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+	err := runPlotTx(s.db, plotID, func(tx *gorm.DB) error {
+		var plot model.Plot
+		if err := tx.First(&plot, plotID).Error; err != nil {
+			return collabErr500("load plot", err)
 		}
 		if plot.Status != string(constants.PlotStatusAvailable) {
 			return util.NewAppError(constants.CodePlotNotAvailable, 409, fmt.Sprintf("地块 %s 当前状态为 %s，不可认养", plot.Code, util.PlotStatusText(plot.Status)))
 		}
 		plot.Status = string(constants.PlotStatusAdopted)
 		plot.AdopterID = &userID
-		if err := s.plotRepo.UpdateWithTx(tx, plot); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		if err := s.plotRepo.UpdateWithTx(tx, &plot); err != nil {
+			return collabErr500("update plot", err)
 		}
 		// 认养人自动成为地块协作 owner 成员（占用 1/4 名额）
 		if err := s.memberSvc.EnsureOwner(tx, plot.ID, userID); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("ensure owner", err)
 		}
-		adopted = plot
+		adopted = &plot
 		return nil
 	})
 	if err != nil {
@@ -176,16 +173,14 @@ func (s *PlotService) Adopt(plotID, userID uint, role, username string) (*model.
 
 // Release 释放地块（管理员或认养人，harvested -> available）。
 // 同一事务内清空全部协作成员并撤回全部待处理邀请：释放后不能再邀请或接受。
+// 使用统一地块行锁入口，突发并发下排队或返回明确 503，不产生 500。
 func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*model.Plot, error) {
 	var released *model.Plot
 	var resetMembers, resetInvitations int64
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		plot, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
-			}
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+	err := runPlotTx(s.db, plotID, func(tx *gorm.DB) error {
+		var plot model.Plot
+		if err := tx.First(&plot, plotID).Error; err != nil {
+			return collabErr500("load plot", err)
 		}
 		if operatorRole != string(constants.RoleAdmin) && (plot.AdopterID == nil || *plot.AdopterID != operatorID) {
 			return util.NewAppError(constants.CodeForbidden, 403, fmt.Sprintf("角色 %s 无权释放地块 %s", util.RoleText(operatorRole), plot.Code))
@@ -193,20 +188,21 @@ func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*mo
 		if plot.Status != string(constants.PlotStatusHarvested) {
 			return util.NewAppError(constants.CodePlotNotAvailable, 409, fmt.Sprintf("地块 %s 当前状态为 %s，仅待释放状态可释放", plot.Code, util.PlotStatusText(plot.Status)))
 		}
+		var err error
 		resetMembers, err = s.memberSvc.ResetOnRelease(tx, plotID)
 		if err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("reset members", err)
 		}
 		resetInvitations, err = s.invitationSvc.RevokeAllPendingOnRelease(tx, plotID)
 		if err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+			return collabErr500("revoke pending", err)
 		}
 		plot.Status = string(constants.PlotStatusAvailable)
 		plot.AdopterID = nil
-		if err := s.plotRepo.UpdateWithTx(tx, plot); err != nil {
-			return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).Wrap(err)
+		if err := s.plotRepo.UpdateWithTx(tx, &plot); err != nil {
+			return collabErr500("update plot", err)
 		}
-		released = plot
+		released = &plot
 		return nil
 	})
 	if err != nil {
@@ -219,14 +215,13 @@ func (s *PlotService) Release(plotID, operatorID uint, operatorRole string) (*mo
 	return released, nil
 }
 
-// MarkHarvested 种植计划完成后将地块置为待释放（harvested）。
+// MarkHarvested 种植计划完成后将地块置为待释放（harvested）。调用方已在持有地块行锁的事务内。
 func (s *PlotService) MarkHarvested(tx *gorm.DB, plotID uint) error {
-	plot, err := s.plotRepo.FindByIDForUpdate(tx, plotID)
-	if err != nil {
+	if err := tx.Model(&model.Plot{}).Where("id = ?", plotID).
+		Update("status", string(constants.PlotStatusHarvested)).Error; err != nil {
 		return err
 	}
-	plot.Status = string(constants.PlotStatusHarvested)
-	return s.plotRepo.UpdateWithTx(tx, plot)
+	return nil
 }
 
 // CountByStatus 地块状态统计（仪表盘复用）。

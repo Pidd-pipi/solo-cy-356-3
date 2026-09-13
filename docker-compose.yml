@@ -47,10 +47,18 @@ services:
       DB_USER: ${DB_USER:-communitygarden_user}
       DB_PASSWORD: ${DB_PASSWORD:-communitygarden_pwd}
       DB_SSLMODE: "disable"
+      # 连接池有界化：突发请求在池内排队，避免打爆 PostgreSQL max_connections
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-25}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-10}
+      DB_CONN_MAX_LIFETIME_SECONDS: "1800"
+      DB_ACQUIRE_TIMEOUT_MS: ${DB_ACQUIRE_TIMEOUT_MS:-3000}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-5000}
+      DB_LOCK_TIMEOUT_MS: ${DB_LOCK_TIMEOUT_MS:-3000}
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
       REDIS_DB: "0"
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-300}
       JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_string}
       JWT_EXPIRE_HOURS: "72"
     ports:

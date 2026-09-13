@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"log/slog"
@@ -34,6 +35,59 @@ var Models = []interface{}{
 	&model.AuditLog{},
 }
 
+// tunePool 将数据库连接池有界化：
+// 突发并发超过空闲连接时在客户端排队等待（受 acquire timeout 约束），
+// 而不是无限新建连接打爆 PostgreSQL 的 max_connections。
+func tunePool(db *gorm.DB, cfg *config.Config, sqlite bool) {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return
+	}
+	if sqlite {
+		// SQLite 单写者：1 个写连接 + 少量读连接，写在池内排队。
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(time.Hour)
+		return
+	}
+	maxOpen := cfg.DBMaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 25
+	}
+	maxIdle := cfg.DBMaxIdleConns
+	if maxIdle <= 0 || maxIdle > maxOpen {
+		maxIdle = minInt(maxOpen, 10)
+	}
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(maxIdle)
+	sqlDB.SetConnMaxLifetime(time.Duration(maxInt(cfg.DBConnMaxLifeS, 60)) * time.Second)
+}
+
+// applyPGTimeouts 设置会话级 statement_timeout / lock_timeout。
+func applyPGTimeouts(db *gorm.DB, cfg *config.Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stmt := maxInt(cfg.DBStatementTimeoutMS, 1000)
+	lock := maxInt(cfg.DBLockTimeoutMS, 1000)
+	return db.WithContext(ctx).Exec(
+		fmt.Sprintf("SET statement_timeout = %d; SET lock_timeout = %d;", stmt, lock),
+	).Error
+}
+
+func maxInt(a, b int) int {
+	if a >= b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a <= b {
+		return a
+	}
+	return b
+}
+
 // Connect 建立 PostgreSQL 连接并完成迁移与种子数据。
 func Connect(cfg *config.Config, logger *slog.Logger) (*gorm.DB, error) {
 	gormWriter := gormlogger.Writer(log.New(os.Stdout, "\r\n", log.LstdFlags))
@@ -47,15 +101,31 @@ func Connect(cfg *config.Config, logger *slog.Logger) (*gorm.DB, error) {
 	if cfg.DBDriver == "sqlite" {
 		// 仅用于本地无 PostgreSQL 环境（如离线演示）；Docker 部署仍使用 PostgreSQL。
 		db, err = gorm.Open(sqlite.Open(cfg.DBName), &gorm.Config{Logger: gormLogger})
+		if err != nil {
+			return nil, err
+		}
+		// 本地单文件库：连接有界，写请求在单连接上排队，避免“database is locked”。
+		tunePool(db, cfg, true)
 	} else {
-		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai",
-			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBSSLMode)
+		// 服务端语句/锁超时：等待行锁超过 lock_timeout 立即收到 55P03，由 service 层重试，
+		// 避免突发流量下事务长时间持锁堆积。
+		dsn := fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai connect_timeout=%d",
+			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, cfg.DBSSLMode,
+			maxInt(cfg.DBAcquireTimeoutMS/1000, 3),
+		)
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: gormLogger})
+		if err != nil {
+			return nil, err
+		}
+		tunePool(db, cfg, false)
+		// 会话级超时（对后续每条语句生效）
+		if err := applyPGTimeouts(db, cfg); err != nil {
+			return nil, err
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	logger.Info(constants.LogDBConnected, "host", cfg.DBHost, "port", cfg.DBPort, "db", cfg.DBName, "driver", cfg.DBDriver)
+	logger.Info(constants.LogDBConnected, "host", cfg.DBHost, "port", cfg.DBPort, "db", cfg.DBName, "driver", cfg.DBDriver,
+		"max_open", cfg.DBMaxOpenConns, "acquire_timeout_ms", cfg.DBAcquireTimeoutMS)
 
 	if err := db.AutoMigrate(Models...); err != nil {
 		return nil, err

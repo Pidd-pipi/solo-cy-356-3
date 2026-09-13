@@ -10,6 +10,7 @@ const (
 	CodeConflict          = 1004
 	CodeValidationFailed  = 1005
 	CodeRateLimited       = 1006
+	CodeServiceBusy        = 1007
 	CodeInternalError     = 5000
 
 	// 业务错误码
@@ -45,6 +46,7 @@ var ErrorText = map[int]string{
 	CodeConflict:          "资源状态冲突",
 	CodeValidationFailed:  "参数校验失败",
 	CodeRateLimited:       "请求过于频繁，请稍后再试",
+	CodeServiceBusy:       "系统繁忙，请求正在排队，请稍后重试",
 	CodeInternalError:     "服务器内部错误",
 	CodePlotNotAvailable:  "地块当前不可认养",
 	CodePlanStateNotAllowed: "种植计划当前状态不允许该操作",

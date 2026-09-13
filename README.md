@@ -313,3 +313,16 @@ scripts/concurrent_e2e.sh   # 接受×重复邀请/多邀请同时接受/同邀�
 ## 📄 License
 
 MIT License
+
+### 突发流量可靠性（连接池 / 排队 / 限流）
+
+- 数据库连接池有界化（`DB_MAX_OPEN_CONNS` 默认 25）：突发请求在客户端**排队**而不是无限建连打爆 PostgreSQL（`53300 too many clients`）；配合 `DB_LOCK_TIMEOUT_MS`（默认 3000）与 `DB_STATEMENT_TIMEOUT_MS`（默认 5000）让锁等待有界。
+- 锁竞争（`40P01/55P03/SQLite locked`）或连接资源耗尽会整体回滚并指数退避+抖动重试；重试耗尽返回明确的 **503 / code 1007「系统繁忙」**，绝不返回 500。
+- 全局限流优先用 Redis；Redis 不可用时自动降级为**进程内固定窗口**兜底，超额返回明确 **429 / code 1006**（`RATE_LIMIT_PER_MIN`，默认 300/分钟）。
+- 四人上限、待处理邀请不占名额、同一邀请单次处理等不变量均在地块行锁串行化 + 唯一索引下保持。
+
+可重复验证：
+
+```bash
+scripts/burst_concurrency.sh   # 真实 HTTP：接受/重复邀请/撤回/释放同时到达，断言 0 个 5xx 且最终状态一致
+```

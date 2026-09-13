@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,8 +16,19 @@ import (
 	"github.com/communitygarden/server/internal/util"
 )
 
-// collabTxMaxRetries 锁竞争（死锁/锁等待/SQLite 写锁）时的有限重试次数。
-const collabTxMaxRetries = 5
+// collabTxMaxRetries 锁竞争/连接资源耗尽（死锁/锁等待/连接池排队超时）时的有限重试次数。
+const collabTxMaxRetries = 6
+
+// collabTxBaseDelay 事务重试基础退避。
+const collabTxBaseDelay = 4 * time.Millisecond
+
+// collabAttemptBudget 单次尝试的整体预算（连接池排队 + 加锁 + 语句）。
+// 0 表示不额外设整体预算：排队由连接池 acquire timeout、持锁由 PostgreSQL lock_timeout 约束；
+// 突发压测/特定部署可用 SetCollabAttemptBudget 调小，使排队尽快失败转重试/503。
+var collabAttemptBudget time.Duration
+
+// SetCollabAttemptBudget 调整单次尝试预算（主要用于测试与运维调优）。
+func SetCollabAttemptBudget(d time.Duration) { collabAttemptBudget = d }
 
 // PlotInvitationService 地块协作邀请服务（邀请/接受/拒绝/撤回 + 协作聚合视图）。
 //
@@ -66,40 +78,62 @@ func runPlotTx(db *gorm.DB, plotID uint, fn func(tx *gorm.DB) error) error {
 	var lastErr error
 	for attempt := 0; attempt < collabTxMaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*attempt) * 5 * time.Millisecond) // 5ms,20ms,45ms,80ms
+			// 指数退避 + 抖动：错峰后重试，避免同批被排队的请求再次同步拥塞
+			backoff := time.Duration(attempt*attempt) * collabTxBaseDelay
+			jitter := jitterMillis(collabTxBaseDelay)
+			time.Sleep(backoff + jitter)
 		}
-		lastErr = db.Transaction(func(tx *gorm.DB) error {
-			// 统一第一把锁：地块行。同一地块的协作写在此处串行。
-			var locked model.Plot
-			if err := tx.Clauses(lockForUpdate()).First(&locked, plotID).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
+		// 每次尝试可带整体预算（连接池排队过久被取消，交外层重试/503）；默认 0 表示不限制。
+		var attemptCtx context.Context
+		var cancel context.CancelFunc
+		if collabAttemptBudget > 0 {
+			attemptCtx, cancel = context.WithTimeout(context.Background(), collabAttemptBudget)
+		} else {
+			attemptCtx, cancel = context.WithCancel(context.Background())
+		}
+		// cancel 必须延迟到 gorm 完成 COMMIT 之后，不能在事务回调内提前取消。
+		lastErr = func() error {
+			defer cancel()
+			return db.WithContext(attemptCtx).Transaction(func(tx *gorm.DB) error {
+				// 统一第一把锁：地块行。同一地块的协作写在此处串行；连接池有界，请求先在池内排队。
+				var locked model.Plot
+				if err := tx.Clauses(lockForUpdate()).First(&locked, plotID).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
+					}
+					if util.IsRetryableResourceError(err) {
+						return err // 交给外层按资源繁忙重试
+					}
+					return collabErr500("lock plot", err)
 				}
-				return collabErr500("lock plot", err)
-			}
-			return fn(tx)
-		})
+				return fn(tx)
+			})
+		}()
 		if lastErr == nil {
 			return nil
 		}
 		if shouldRetryCollabTx(lastErr) {
-			continue // 死锁/锁等待：回退后重试整个事务
+			continue // 锁竞争/连接池耗尽：整事务已回滚，退避后重试
 		}
 		return lastErr // 业务错误或其它错误：直接返回
 	}
-	// 锁竞争在最大次数内仍未成功：返回规范的 5000（不向调用方泄漏底层锁错误）
-	return util.NewAppError(constants.CodeInternalError, 500,
-		constants.ErrorText[constants.CodeInternalError]).Wrap(fmt.Errorf("协作事务锁竞争重试耗尽: %w", lastErr))
+	// 重试耗尽：资源/锁类瞬态错误返回明确的“繁忙排队”503，不暴露成 500
+	if util.IsRetryableResourceError(lastErr) {
+		return util.NewAppError(constants.CodeServiceBusy, 503, constants.ErrorText[constants.CodeServiceBusy]).
+			Wrap(fmt.Errorf("协作事务繁忙重试耗尽: %w", lastErr))
+	}
+	return util.NewAppError(constants.CodeInternalError, 500, constants.ErrorText[constants.CodeInternalError]).
+		Wrap(fmt.Errorf("协作事务重试耗尽: %w", lastErr))
 }
 
-// shouldRetryCollabTx 判断协作写事务是否应因锁竞争重试：
-// 裸数据库锁错误，或内部错误(5000)的根因为锁错误时重试；明确业务冲突不重试。
+// shouldRetryCollabTx 判断协作写事务是否应重试：
+// 裸数据库锁/资源错误，或内部错误的根因为锁/资源错误时重试；明确业务冲突不重试。
 func shouldRetryCollabTx(err error) bool {
 	var ae *util.AppError
 	if errors.As(err, &ae) {
-		return ae.Code == constants.CodeInternalError && util.IsRetryableLockError(err)
+		return ae.Code == constants.CodeInternalError && util.IsRetryableResourceError(err)
 	}
-	return util.IsRetryableLockError(err)
+	return util.IsRetryableResourceError(err)
 }
 
 // lockActivePlot 校验地块仍在协作生命周期内（未释放回共享池）。
