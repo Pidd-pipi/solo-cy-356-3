@@ -96,8 +96,7 @@ func runPlotTx(db *gorm.DB, plotID uint, fn func(tx *gorm.DB) error) error {
 			defer cancel()
 			return db.WithContext(attemptCtx).Transaction(func(tx *gorm.DB) error {
 				// 统一第一把锁：地块行。同一地块的协作写在此处串行；连接池有界，请求先在池内排队。
-				var locked model.Plot
-				if err := tx.Clauses(lockForUpdate()).First(&locked, plotID).Error; err != nil {
+				if err := lockPlotForUpdate(tx, plotID); err != nil {
 					if errors.Is(err, gorm.ErrRecordNotFound) {
 						return util.NewAppError(constants.CodeNotFound, 404, fmt.Sprintf("地块实体 id=%d 不存在", plotID))
 					}

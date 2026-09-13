@@ -28,7 +28,7 @@ func (m *memoryLimiter) allow(key string, limit int, now time.Time, window time.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wc, ok := m.entries[key]
-	if !ok || now.After(wc.resetAt) {
+	if !ok || !now.Before(wc.resetAt) { // now >= resetAt 即新窗口
 		m.entries[key] = &windowCounter{count: 1, resetAt: now.Add(window)}
 		return int64(limit) >= 1
 	}
@@ -43,7 +43,7 @@ func (m *memoryLimiter) janitor() {
 	for now := range ticker.C {
 		m.mu.Lock()
 		for k, v := range m.entries {
-			if now.After(v.resetAt) {
+			if !now.Before(v.resetAt) {
 				delete(m.entries, k)
 			}
 		}
